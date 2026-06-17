@@ -1,0 +1,386 @@
+#define BLYNK_PRINT Serial
+
+
+// =====================================================
+// BLYNK CONFIG
+// =====================================================
+#define BLYNK_TEMPLATE_ID "----------------"
+#define BLYNK_TEMPLATE_NAME "Quickstart Template"
+#define BLYNK_AUTH_TOKEN "-------------------"
+
+
+// =====================================================
+// LIBRARIES
+// =====================================================
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <BlynkSimpleEsp32.h>
+#include <Preferences.h>
+
+
+WiFiMulti wifiMulti;
+BlynkTimer timer;
+Preferences preferences;
+
+
+// =====================================================
+// CONFIG
+// =====================================================
+#define N 5
+
+
+int relayPins[N]  = {23, 22, 21, 19, 18};
+int switchPins[N] = {13, 12, 14, 27, 26};
+int vPins[N]      = {V1, V2, V3, V4, V5};
+
+
+// =====================================================
+// STATES
+// =====================================================
+bool relayState[N] = {0};
+bool lastSwitch[N] = {1};
+unsigned long lastDebounce[N] = {0};
+int debounceDelay = 200;
+
+
+// =====================================================
+// AUTO OFF (Device 4 = 7 sec)
+// =====================================================
+int autoOffTime[N] = {0, 0, 0, 7, 0};
+bool cancelAutoOff[N] = {false};
+
+
+// =====================================================
+// LOG + USAGE
+// =====================================================
+String eventLog[10];
+int logIndex = 0;
+
+
+int usageCount[N] = {0};
+
+
+// =====================================================
+// WIFI CREDENTIALS
+// =====================================================
+const char* ssid1 = "---------------";
+const char* pass1 = "---------------";
+const char* ssid2 = "---------------";
+const char* pass2 = "---------------";
+const char* ssid3 = "---------------";
+const char* pass3 = "---------------";
+
+
+// =====================================================
+// SEND LOGS TO BLYNK (V40)
+// =====================================================
+void sendLogsToBlynk() {
+
+
+  String data = "";
+
+
+  for (int i = 0; i < 10; i++) {
+    data += eventLog[i];
+    data += "\n";
+  }
+
+
+  Blynk.virtualWrite(V40, data);
+}
+
+
+// =====================================================
+// SEND USAGE TO BLYNK (V41)
+// =====================================================
+void sendUsageToBlynk() {
+
+
+  String data = "";
+
+
+  for (int i = 0; i < N; i++) {
+    data += "Device ";
+    data += (i + 1);
+    data += ": ";
+    data += usageCount[i];
+    data += "\n";
+  }
+
+
+  Blynk.virtualWrite(V41, data);
+}
+
+
+// =====================================================
+// LOG EVENT
+// =====================================================
+void logEvent(int i, bool state) {
+
+
+  String msg = "Device ";
+  msg += (i + 1);
+  msg += state ? " ON" : " OFF";
+
+
+  eventLog[logIndex] = msg;
+  logIndex = (logIndex + 1) % 10;
+
+
+  Serial.println(msg);
+
+
+  sendLogsToBlynk();
+}
+
+
+// =====================================================
+// SAVE STATE
+// =====================================================
+void saveState(int i, bool state) {
+  String key = "r" + String(i);
+  preferences.putBool(key.c_str(), state);
+}
+
+
+// =====================================================
+// MAIN RELAY FUNCTION
+// =====================================================
+void setRelay(int i, bool state, bool fromScene = false) {
+
+
+  relayState[i] = state;
+
+
+  digitalWrite(relayPins[i], state ? LOW : HIGH);
+
+
+  Blynk.virtualWrite(vPins[i], state);
+
+
+  saveState(i, state);
+  logEvent(i, state);
+
+
+  if (state) {
+    usageCount[i]++;
+    sendUsageToBlynk();
+  }
+
+
+  if (fromScene) {
+    cancelAutoOff[i] = true;
+  }
+
+
+  // AUTO OFF ONLY DEVICE 4 (7 sec)
+  if (state && autoOffTime[i] > 0 && !fromScene) {
+
+
+    cancelAutoOff[i] = false;
+
+
+    timer.setTimeout(autoOffTime[i] * 1000L, [i]() {
+
+
+      if (cancelAutoOff[i]) return;
+
+
+      setRelay(i, 0);
+    });
+  }
+}
+
+
+// =====================================================
+// RESTORE STATE
+// =====================================================
+void restoreState() {
+
+
+  for (int i = 0; i < N; i++) {
+
+
+    String key = "r" + String(i);
+
+
+    relayState[i] = preferences.getBool(key.c_str(), 0);
+
+
+    digitalWrite(relayPins[i], relayState[i] ? LOW : HIGH);
+  }
+}
+
+
+// =====================================================
+// WIFI CONNECT
+// =====================================================
+void connectWiFi() {
+
+
+  wifiMulti.addAP(ssid1, pass1);
+  wifiMulti.addAP(ssid2, pass2);
+  wifiMulti.addAP(ssid3, pass3);
+
+
+  Serial.println("Connecting WiFi...");
+
+
+  while (wifiMulti.run() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+
+  Serial.println("\nWiFi Connected");
+}
+
+
+// =====================================================
+// SWITCHES
+// =====================================================
+void handleSwitches() {
+
+
+  for (int i = 0; i < N; i++) {
+
+
+    bool curr = digitalRead(switchPins[i]);
+
+
+    if (curr == LOW &&
+        lastSwitch[i] == HIGH &&
+        millis() - lastDebounce[i] > debounceDelay) {
+
+
+      setRelay(i, !relayState[i]);
+      lastDebounce[i] = millis();
+    }
+
+
+    lastSwitch[i] = curr;
+  }
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup() {
+
+
+  Serial.begin(115200);
+  delay(1500);
+
+
+  preferences.begin("relay", false);
+
+
+  connectWiFi();
+
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+
+  for (int i = 0; i < N; i++) {
+
+
+    pinMode(relayPins[i], OUTPUT);
+    digitalWrite(relayPins[i], HIGH);
+
+
+    pinMode(switchPins[i], INPUT_PULLUP);
+  }
+
+
+  restoreState();
+
+
+  Serial.println("System Ready");
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+void loop() {
+
+
+  if (Blynk.connected()) Blynk.run();
+  else Blynk.connect(1000);
+
+
+  timer.run();
+  handleSwitches();
+}
+
+
+// =====================================================
+// BLYNK BUTTONS
+// =====================================================
+BLYNK_WRITE(V1) { setRelay(0, param.asInt()); }
+BLYNK_WRITE(V2) { setRelay(1, param.asInt()); }
+BLYNK_WRITE(V3) { setRelay(2, param.asInt()); }
+BLYNK_WRITE(V4) { setRelay(3, param.asInt()); }
+BLYNK_WRITE(V5) { setRelay(4, param.asInt()); }
+
+
+// state 1 =on and state 0 =off
+
+
+// =====================================================
+// GROUP LIGHTS
+// =====================================================
+BLYNK_WRITE(V20) {
+
+
+  int state = param.asInt();
+
+
+  for (int i = 0; i < 3; i++) {
+    setRelay(i, state, true);
+  }
+}
+//1 instead of state will on all 3 first group
+// =====================================================
+// BED MODE
+// =====================================================
+BLYNK_WRITE(V21) {
+
+
+  for (int i = 0; i < N; i++) {
+    setRelay(i, 0, true);
+  }
+
+
+  setRelay(4, 1, true);
+}
+
+
+// =====================================================
+// LEAVE HOME
+// =====================================================
+BLYNK_WRITE(V30) {
+
+
+  for (int i = 0; i < N; i++) {
+    setRelay(i, 0, true);
+  }
+}
+
+
+// =====================================================
+// SYNC ON CONNECT
+// =====================================================
+BLYNK_CONNECTED() {
+
+
+  sendLogsToBlynk();
+  sendUsageToBlynk();
+
+
+  for (int i = 0; i < N; i++) {
+    Blynk.virtualWrite(vPins[i], relayState[i]);
+  }
+}
